@@ -1,7 +1,7 @@
 const express = require('express')
 const HTTPStatus = require('http-status')
 const app = express()
-const port = 80
+const port = 3030
 const cors = require('cors')
 const bodyParser = require('body-parser')
 const Trading = require('./model/trading')
@@ -11,13 +11,16 @@ const apiBinance = require('./lib/apibinance')
 const callLeverage = require('./lib/calLeverage')
 const realEnvironment = require('./lib/realEnv')
 const combine = require('./lib/combineUser')
+const get = combine.combineUser()
+require('dotenv').config()
+
 app.use(cors())
 app.use(bodyParser.json())
 app.use(bodyParser.urlencoded({ extended: false }))
 
 const mongoose = require('mongoose')
 // const connectionString = 'mongodb://admin:AaBb1234!@27.254.144.100/trading'
-const connectionString = 'mongodb://localhost:27017/trading'
+const connectionString = process.env.DATABASE
 
 mongoose
   .connect(connectionString, {
@@ -32,7 +35,7 @@ app.get('/getbinance', async (req, res) => {
   } catch (error) {}
 })
 
-app.post('/gettrading', async (req, res) => {
+app.post('/getkla', async (req, res) => {
   try {
     bodyq = req.body
 
@@ -41,49 +44,90 @@ app.post('/gettrading', async (req, res) => {
     const checkMarket = await Log.findOne({
       symbol: body.symbol
     })
-    if (checkMarket) {
-      const checkTakeOrCancle = await apiBinance.getOrder(
+
+    if (checkMarket?.binanceTakeProfit) {
+      const checkTakeOrCancleTakeProfit = await apiBinance?.getOrder(
         checkMarket?.binanceTakeProfit?.orderId,
-        body.symbol
+        body?.symbol,
+        get.API_KEY[0],
+        get.SECRET_KEY[0]
+      )
+      const checkTakeOrCancleStopLoss = await apiBinance?.getOrder(
+        checkMarket?.binanceStopLoss?.orderId,
+        body?.symbol,
+        get.API_KEY[0],
+        get.SECRET_KEY[0]
       )
       if (
-        checkTakeOrCancle?.status === 'CANCELED' ||
-        checkTakeOrCancle?.status === 'CLOSED' ||
-        checkTakeOrCancle?.status === 'EXPIRED'
+        checkTakeOrCancleTakeProfit?.status === 'FILLED' ||
+        checkTakeOrCancleTakeProfit?.status === 'CANCELED' ||
+        checkTakeOrCancleTakeProfit?.status === 'EXPIRED'
       ) {
-        await Log.findOneAndDelete({ symbol: body.symbol })
-      }
-    }
-
-    if (body.type === 'MARKET') {
-      const checkMarketFirst = await Log.findOne({ symbol: body.symbol })
-      const get = combine.combineUser()
-      if (!checkMarketFirst) {
-        const calLeverage = await callLeverage.leverageCal(
+        const cancleOrderStopLoss = await apiBinance.cancleOrder(
           body.symbol,
-          body.priceCal,
-          body.stopPriceCal,
-          body.side,
+          checkMarket?.binanceStopLoss?.orderId,
           get.API_KEY[0],
           get.SECRET_KEY[0]
         )
-
-        checkCondition(
-          body,
-          res,
-          calLeverage.maximumQty,
-          calLeverage.defaultLeverage,
-          calLeverage.budget,
-          calLeverage.minimum,
-          calLeverage.openLongShort,
-          calLeverage.st,
-          calLeverage.valueAskBid,
-          calLeverage.price,
-          calLeverage.bids,
-          calLeverage.asks
-        )
-      } else console.log('arleady have market')
-    } else checkCondition(body, res)
+        await Log.deleteOne({ symbol: body.symbol })
+      }
+      if (checkTakeOrCancleStopLoss?.status === 'FILLED') {
+        await Log.deleteOne({ symbol: body.symbol })
+      }
+    }
+    if (body.type === 'MARKET') {
+      const getAllOpenOrder = await apiBinance.getAllOpenOrder(
+        get.API_KEY[0],
+        get.SECRET_KEY[0]
+      )
+      const checkOpenOrder = getAllOpenOrder.filter((item) => {
+        return item.type === 'TAKE_PROFIT_MARKET'
+      })
+      if (checkOpenOrder.length <= 10) {
+        const checkMarketFirst = await Log.findOne({ symbol: body.symbol })
+        if (checkMarketFirst === null) {
+          const calLeverage = await callLeverage.leverageCal(
+            body.symbol,
+            body.priceCal,
+            body.stopPriceCal,
+            body.side,
+            get.API_KEY[0],
+            get.SECRET_KEY[0]
+          )
+          checkCondition(
+            body,
+            res,
+            calLeverage.maximumQty,
+            calLeverage.defaultLeverage,
+            calLeverage.budget,
+            calLeverage.minimum,
+            calLeverage.openLongShort,
+            calLeverage.st,
+            calLeverage.valueAskBid,
+            calLeverage.price,
+            calLeverage.bids,
+            calLeverage.asks,
+            calLeverage.marginStart,
+            calLeverage.marginEnd,
+            calLeverage.lpStart,
+            calLeverage.lpEnd,
+            calLeverage.qtyStart,
+            calLeverage.qtyEnd,
+            calLeverage.marginEnd2,
+            calLeverage.lpEnd2,
+            calLeverage.qtyEnd2
+          )
+        } else console.log('arleady have market')
+      } else {
+        const buyit = {
+          text: 'overTrade',
+          msg: `เกินลิมิตเทรด > ${checkOpenOrder.length} | ชื่อเหรียญ : ${body.symbol}`
+        }
+        await lineNotifyPost.postLineNotify(buyit)
+      }
+    } else {
+      checkCondition(body, res)
+    }
 
     return res.status(HTTPStatus.OK).json({ success: true, data: 'ok' })
   } catch (error) {}
@@ -101,7 +145,16 @@ const checkCondition = async (
   valueAskBid,
   price,
   bids,
-  asks
+  asks,
+  marginStart,
+  marginEnd,
+  lpStart,
+  lpEnd,
+  qtyStart,
+  qtyEnd,
+  marginEnd2,
+  lpEnd2,
+  qtyEnd2
 ) => {
   try {
     const finalBody = {
@@ -115,7 +168,16 @@ const checkCondition = async (
       valueAskBid: valueAskBid,
       price: price,
       bids: bids,
-      asks: asks
+      asks: asks,
+      marginStart: marginStart,
+      marginEnd: marginEnd,
+      lpStart: lpStart,
+      lpEnd: lpEnd,
+      qtyStart: qtyStart,
+      qtyEnd: qtyEnd,
+      marginEnd2: marginEnd2,
+      lpEnd2: lpEnd2,
+      qtyEnd2: qtyEnd2
     }
 
     const checkLog = await Log.findOne({
@@ -126,14 +188,10 @@ const checkCondition = async (
       (finalBody.type === 'STOP_MARKET' && checkLog) ||
       finalBody.type === 'MARKET'
     ) {
-      // for (const user of get)
       await lineNotifyPost.postLineNotify(lineNotify(finalBody))
     }
 
     if (body.type === 'MARKET') {
-      const get = combine.combineUser()
-
-      // for (let i = 0; i < 2; i++) {
       let en = {
         ...finalBody,
         apiKey: get.API_KEY[0],
@@ -156,7 +214,6 @@ const checkStopLoss = async (body) => {
 
     const qty = 0
     const status = true
-
     // check order first
     const checkMarket = await Log.findOne({
       symbol: symbol
@@ -174,10 +231,19 @@ const checkStopLoss = async (body) => {
         qty,
         type,
         stopPrice,
-        status
+        status,
+        'takeprofit',
+        get.API_KEY[0],
+        get.SECRET_KEY[0]
       )
+
       if (data.status === 200) {
-        await apiBinance.cancleOrder(symbol, check.binanceStopLoss.orderId)
+        await apiBinance.cancleOrder(
+          symbol,
+          check.binanceStopLoss.orderId,
+          get.API_KEY[0],
+          get.SECRET_KEY[0]
+        )
         await Log.findOneAndUpdate(
           { symbol: symbol },
           {
@@ -212,7 +278,10 @@ const checkStopLoss = async (body) => {
         qty,
         type,
         stopPrice,
-        status
+        status,
+        'takeprofit',
+        get.API_KEY[0],
+        get.SECRET_KEY[0]
       )
 
       if (data.status === 200) {
@@ -238,16 +307,6 @@ const checkStopLoss = async (body) => {
         await lineNotifyPost.postLineNotify(buyit)
       }
     }
-
-    // } else {
-    //   const buyit = {
-    //     symbol: symbol,
-    //     text: 'checkstoploss',
-    //     type: type,
-    //     msg: 'ยังไม่มีคำสั่งซื้อ'
-    //   }
-    //   await lineNotifyPost.postLineNotify(buyit)
-    // }
   } catch (error) {}
 }
 
@@ -278,9 +337,12 @@ const checkMarketBody = (body) => {
     type: body[0].type,
     side: body[0].side,
     symbol: body[0].symbol,
-    takeProfit: filteredBody[0],
-    priceCal: body[0].priceCal,
-    stopPriceCal: body[0].stopPriceCal
+    takeProfit: {
+      ...filteredBody[0],
+      takeprofit: parseFloat(filteredBody[0].takeprofit)
+    },
+    priceCal: parseFloat(body[0].priceCal),
+    stopPriceCal: parseFloat(body[0].stopPriceCal)
   }
 
   return real
@@ -293,8 +355,8 @@ const checkStopLossBody = (bodyq) => {
     type: bodyq.type,
     side: bodyq.side,
     symbol: bodyq.symbol,
-    price: bodyq.priceCal,
-    stopPrice: bodyq.stopPrice
+    price: parseFloat(bodyq.price),
+    stopPrice: parseFloat(bodyq.stopPrice)
   }
 
   return real
